@@ -1,6 +1,16 @@
+import { useState , useRef } from "react";
 import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
+import { useInterview } from "../hooks/useInterview"
+
+
+
+
 
 const Home = () => {
+  
+
+
   return (
     <div className="flex flex-col items-center justify-center min-h-screen px-6 text-center bg-gradient-to-br from-black via-gray-900 to-gray-800">
 

@@ -1,59 +1,236 @@
-const { GoogleGenAI } = require("@google/genai")
+const Groq = require("groq-sdk")
 const { z } = require("zod")
-const { zodToJsonSchema } = require("zod-to-json-schema")
 
-const ai = new GoogleGenAI({
-    apiKey : process.env.GOOGLE_API_KEY
+const puppeteer = require("puppeteer")
+
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY
 })
 
-
+// ✅ SAME schema (no change)
 const interviewReportSchema = z.object({
-    matchScore: z.number().describe("A score between 0 and 100 indicating how well the candidate's profile matches the job describe"),
-    technicalQuestions: z.array(z.object({
-        question: z.string().describe("The technical question can be asked in the interview"),
-        intention: z.string().describe("The intention of interviewer behind asking this question"),
-        answer: z.string().describe("How to answer this question, what points to cover, what approach to take etc.")
-    })).describe("Technical questions that can be asked in the interview along with their intention and how to answer them"),
-    behavioralQuestions: z.array(z.object({
-        question: z.string().describe("The technical question can be asked in the interview"),
-        intention: z.string().describe("The intention of interviewer behind asking this question"),
-        answer: z.string().describe("How to answer this question, what points to cover, what approach to take etc.")
-    })).describe("Behavioral questions that can be asked in the interview along with their intention and how to answer them"),
-    skillGaps: z.array(z.object({
-        skill: z.string().describe("The skill which the candidate is lacking"),
-        severity: z.enum([ "low", "medium", "high" ]).describe("The severity of this skill gap, i.e. how important is this skill for the job and how much it can impact the candidate's chances")
-    })).describe("List of skill gaps in the candidate's profile along with their severity"),
-    preparationPlan: z.array(z.object({
-        day: z.number().describe("The day number in the preparation plan, starting from 1"),
-        focus: z.string().describe("The main focus of this day in the preparation plan, e.g. data structures, system design, mock interviews etc."),
-        tasks: z.array(z.string()).describe("List of tasks to be done on this day to follow the preparation plan, e.g. read a specific book or article, solve a set of problems, watch a video etc.")
-    })).describe("A day-wise preparation plan for the candidate to follow in order to prepare for the interview effectively"),
-    title: z.string().describe("The title of the job for which the interview report is generated"),
+  matchScore: z.number(),
+  technicalQuestions: z.array(
+    z.object({
+      question: z.string(),
+      intention: z.string(),
+      answer: z.string()
+    })
+  ),
+  behavioralQuestions: z.array(
+    z.object({
+      question: z.string(),
+      intention: z.string(),
+      answer: z.string()
+    })
+  ),
+  skillGaps: z.array(
+    z.object({
+      skill: z.string(),
+      severity: z.enum(["low", "medium", "high"])
+    })
+  ),
+  preparationPlan: z.array(
+    z.object({
+      day: z.number(),
+      focus: z.string(),
+      tasks: z.array(z.string())
+    })
+  ),
+  title: z.string()
 })
 
 
-async function generateInterviewReport({ resume, selfDescription, jobDescription }) {
-
-
-    const prompt = `Generate an interview report for a candidate with the following details:
-                        Resume: ${resume}
-                        Self Description: ${selfDescription}
-                        Job Description: ${jobDescription}
-`
-
-    const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: zodToJsonSchema(interviewReportSchema),
-        }
-    })
-    
-    return JSON.parse(response.text)
-
-
+// 🔧 Helper: clean JSON
+function cleanJSON(text) {
+  return text
+    .replace(/```json/g, "")
+    .replace(/```/g, "")
+    .trim()
 }
 
 
-module.exports = {generateInterviewReport}
+// 🔥 MAIN FUNCTION
+async function generateInterviewReport({ resume, selfDescription, jobDescription }) {
+
+  const prompt = `
+You are an AI that MUST return STRICT JSON.
+
+RULES:
+- Output ONLY valid JSON
+- NO explanation
+- NO backticks
+- DO NOT skip fields
+
+Structure:
+{
+  "matchScore": number,
+  "technicalQuestions": [
+    { "question": string, "intention": string, "answer": string }
+  ],
+  "behavioralQuestions": [
+    { "question": string, "intention": string, "answer": string }
+  ],
+  "skillGaps": [
+    { "skill": string, "severity": "low" | "medium" | "high" }
+  ],
+  "preparationPlan": [
+    { "day": number, "focus": string, "tasks": string[] }
+  ],
+  "title": string
+}
+
+Resume: ${resume.slice(0, 2000)}
+Self Description: ${selfDescription}
+Job Description: ${jobDescription}
+`
+
+  const response = await groq.chat.completions.create({
+    model: "llama-3.1-8b-instant", // 🔥 best free model
+    messages: [
+      { role: "user", content: prompt }
+    ],
+    temperature: 0.3
+  })
+
+  const rawText = response.choices[0].message.content
+
+  console.log("RAW AI:", rawText)
+
+  let parsed
+
+  try {
+    parsed = JSON.parse(cleanJSON(rawText))
+  } catch (err) {
+    console.error("❌ JSON Parse Error:", rawText)
+
+    // fallback (important)
+    return {
+      matchScore: 50,
+      technicalQuestions: [],
+      behavioralQuestions: [],
+      skillGaps: [],
+      preparationPlan: [],
+      title: "Unknown Role"
+    }
+  }
+
+  // ✅ Zod validation
+  try {
+    return interviewReportSchema.parse(parsed)
+  } catch (err) {
+    console.error("❌ Validation Error:", err)
+
+    return {
+      matchScore: parsed.matchScore || 50,
+      technicalQuestions: parsed.technicalQuestions || [],
+      behavioralQuestions: parsed.behavioralQuestions || [],
+      skillGaps: parsed.skillGaps || [],
+      preparationPlan: parsed.preparationPlan || [],
+      title: parsed.title || "Unknown Role"
+    }
+  }
+}
+
+async function generatePdfFromHtml(htmlContent) {
+    const browser = await puppeteer.launch()
+    const page = await browser.newPage();
+    await page.setContent(htmlContent, { waitUntil: "networkidle0" })
+
+    const pdfBuffer = await page.pdf({
+        format: "A4", margin: {
+            top: "20mm",
+            bottom: "20mm",
+            left: "15mm",
+            right: "15mm"
+        }
+    })
+
+    await browser.close()
+
+    return pdfBuffer
+}
+
+async function generateResumePdf({ resume, selfDescription, jobDescription }) {
+
+  const prompt = `
+You are an AI that MUST return STRICT JSON.
+
+RULES:
+- Output ONLY valid JSON
+- NO explanation
+- NO backticks
+- DO NOT skip fields
+
+Structure:
+{
+  "html": string
+}
+
+Instructions:
+- Generate a professional ATS-friendly resume in HTML format
+- Use clean structure (h1, h2, ul, li)
+- Keep design simple and readable
+- Use minimal inline CSS
+- Highlight relevant skills based on job description
+- Make it look like human-written (NOT AI generated)
+- Keep it concise (1–2 pages max)
+
+Resume: ${resume.slice(0, 2000)}
+Self Description: ${selfDescription}
+Job Description: ${jobDescription}
+`
+
+  const response = await groq.chat.completions.create({
+    model: "llama-3.1-8b-instant", // ✅ same as your interview fn
+    messages: [
+      { role: "user", content: prompt }
+    ],
+    temperature: 0.3
+  })
+
+  const rawText = response.choices[0].message.content
+
+  // console.log("RAW RESUME AI:", rawText)
+
+  let parsed
+
+  try {
+    parsed = JSON.parse(cleanJSON(rawText))
+  } catch (err) {
+    console.error("❌ JSON Parse Error:", rawText)
+
+    // fallback HTML
+    const fallbackHtml = `
+      <html>
+        <body>
+          <h1>Resume Generation Failed</h1>
+          <p>Please try again.</p>
+        </body>
+      </html>
+    `
+
+    return await generatePdfFromHtml(fallbackHtml)
+  }
+
+  // ✅ basic validation
+  if (!parsed.html) {
+    const fallbackHtml = `
+      <html>
+        <body>
+          <h1>Invalid Resume Output</h1>
+          <p>Missing HTML content.</p>
+        </body>
+      </html>
+    `
+
+    return await generatePdfFromHtml(fallbackHtml)
+  }
+
+  // ✅ generate PDF
+  const pdfBuffer = await generatePdfFromHtml(parsed.html)
+
+  return pdfBuffer
+}
+
+module.exports = { generateInterviewReport , generateResumePdf }
